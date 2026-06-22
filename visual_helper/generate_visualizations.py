@@ -6,7 +6,7 @@ of presentation-ready figures grouped into five themes:
 
     overview/  - data sanity checks (players per season, retention, PPG dist)
     value/     - fantasy H2H value insights (category breakdown, scarcity, ...)
-    thesis/    - real value (Win Shares) vs fantasy value (H2H)
+    thesis/    - pre-draft H2H value vs simulated in-league win shares
     model/     - projection model evaluation (pred vs actual, errors, CIs)
     draft/     - draft simulation results (standings, team strengths)
 
@@ -26,7 +26,6 @@ import numpy as np
 import pandas as pd
 import matplotlib as mpl
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
 from scipy import stats
 
 
@@ -70,13 +69,11 @@ BLUE = "#0072b2"
 ORANGE = "#d55e00"
 HIGHLIGHT = "#e69f00"
 
-# Perceptually uniform, colorblind-safe colormaps (the course notes recommend
-# viridis-family maps over the old non-uniform "jet").
+# Perceptually uniform colormap for single-quantity bar fills.
 SEQUENTIAL = plt.get_cmap("viridis")
-# Diverging map with a light middle; blue<->orange avoids the red/green trap.
-DIVERGING = LinearSegmentedColormap.from_list(
-    "blue_orange", ["#0072b2", "#f5f5f5", "#d55e00"]
-)
+# Diverging map for heatmaps: warm red = high, cold blue = low, light middle.
+# (Red-blue is a standard colorblind-safe diverging scheme.)
+DIVERGING = plt.get_cmap("RdBu_r")
 
 
 def set_theme() -> None:
@@ -146,6 +143,59 @@ def style_axes(ax: plt.Axes) -> None:
 # The 9 H2H category columns as stored in the value CSVs.
 H2H_CATS = ["PTS", "REB", "AST", "STL", "BLK", "FG3M", "TOV", "FG", "FT"]
 
+# Human-readable names for every stat abbreviation, so readers who do not follow
+# basketball can understand the figures.
+STAT_LABELS = {
+    "PTS": "Points",
+    "REB": "Rebounds",
+    "AST": "Assists",
+    "STL": "Steals",
+    "BLK": "Blocks",
+    "FG3M": "3-Pointers Made",
+    "TOV": "Turnovers",
+    "FG": "Field Goal %",
+    "FT": "Free Throw %",
+    "FG%": "Field Goal %",
+    "FT%": "Free Throw %",
+    "FG_pct": "Field Goal %",
+    "FT_pct": "Free Throw %",
+    "games_played": "Games Played",
+}
+
+
+def pretty(stat: str) -> str:
+    """Map a stat abbreviation to a full readable name (with abbreviation kept)."""
+    full = STAT_LABELS.get(stat)
+    if full is None:
+        return stat
+    abbr = stat.replace("_pct", "%")
+    return f"{full}\n({abbr})"
+
+
+def pretty_inline(stat: str) -> str:
+    full = STAT_LABELS.get(stat)
+    return f"{full} ({stat})" if full else stat
+
+
+def strategy_label(strategy: str, punts: str, risk: float) -> str:
+    """Build a short, readable label for a draft strategy from its parameters."""
+    strategy = str(strategy or "baseline").lower()
+    # Empty punt sets are stored as NaN (a float) by pandas; treat as no punt.
+    punts = punts.strip() if isinstance(punts, str) else ""
+    base = {
+        "baseline": "Balanced",
+        "blocks_heavy": "Blocks-heavy",
+        "guard": "Guard-focused",
+        "big": "Big-man-focused",
+    }.get(strategy, strategy.title())
+
+    if punts:
+        nice = ", ".join(STAT_LABELS.get(p, p).replace(" %", "%") for p in punts.split(","))
+        base = f"{base}\n(punt {nice})"
+    elif strategy == "baseline" and risk and float(risk) > 0.2:
+        base = f"{base}\n(low-risk)"
+    return base
+
 
 # ---------------------------------------------------------------------
 # Theme: overview
@@ -171,15 +221,14 @@ def fig_active_players_per_season(season_df: pd.DataFrame) -> None:
                 f"{int(val)}", ha="center", va="bottom", fontsize=11, fontweight="bold",
                 color="#1e293b")
 
-    ax.set_title("Player counts taper off in earlier seasons, as expected from roster turnover")
+    ax.set_title("Number of distinct active players per season (2023-2026)")
     ax.set_xlabel("Season")
     ax.set_ylabel("Number of distinct players")
     ax.set_ylim(0, counts["n_players"].max() * 1.12)
     style_axes(ax)
     fig.text(0.5, -0.02,
-             "Distinct players with at least one game log per season (2023-2026), "
-             "scraped from Basketball-Reference. A near-constant ~50-player drop per earlier "
-             "season is a sanity check on scraping completeness.",
+             "Each player counted once per season if they have at least one scraped game log "
+             "(source: Basketball-Reference).",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "overview", "active_players_per_season.png")
 
@@ -212,14 +261,14 @@ def fig_player_retention(season_df: pd.DataFrame) -> None:
                 f"{val}\n({pct:.0f}%)", ha="center", va="bottom", fontsize=10,
                 fontweight="bold", color="#1e293b")
 
-    ax.set_title(f"Fewer of the {latest} players appear in each earlier season")
+    ax.set_title(f"Players active in {latest} who also appear in each earlier season")
     ax.set_xlabel("Season")
     ax.set_ylabel(f"Players also active in {latest}")
     ax.set_ylim(0, max(vals) * 1.16)
     style_axes(ax)
     fig.text(0.5, -0.02,
-             f"Of {len(latest_players)} players active in {latest}, the bars show how many also "
-             f"appear in each earlier season.",
+             f"Of the {len(latest_players)} players active in {latest}, each bar counts how many "
+             f"also have game logs in that earlier season (the {latest} bar is the full pool).",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "overview", "player_retention.png")
 
@@ -261,11 +310,10 @@ def fig_ppg_distribution_by_season(season_df: pd.DataFrame) -> None:
         ax.legend(fontsize=8.5)
         style_axes(ax)
 
-    fig.suptitle("Scoring is right-skewed every season: most players sit in single digits", y=0.99)
+    fig.suptitle("Distribution of points per game by season", y=0.99)
     fig.text(0.5, -0.01,
-             "One panel per season (conditioning on season). Bars are the empirical density of "
-             "points per game; the orange curve is a fitted normal for comparison. The right skew "
-             "(few high scorers) means a normal is only a rough fit.",
+             "One panel per season. Bars are the empirical density of players' points-per-game; "
+             "the orange curve is a fitted normal distribution and the dashed line marks the mean.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "overview", "ppg_distribution_by_season.png")
 
@@ -297,26 +345,26 @@ def fig_category_breakdown(value_df: pd.DataFrame) -> None:
     # individual segments hard to compare.
     plot = top.set_index("player_id")[cats]
 
-    fig, ax = plt.subplots(figsize=(11, 8.5))
-    im = ax.imshow(plot.values, cmap=SEQUENTIAL, aspect="auto", vmin=-1, vmax=1)
+    fig, ax = plt.subplots(figsize=(13, 8.5))
+    im = ax.imshow(plot.values, cmap=DIVERGING, aspect="auto", vmin=-1, vmax=1)
     ax.set_xticks(range(len(cats)))
-    ax.set_xticklabels(cats)
+    ax.set_xticklabels([pretty(c) for c in cats], fontsize=9)
     ax.set_yticks(range(len(plot.index)))
     ax.set_yticklabels(plot.index)
     for i in range(len(plot.index)):
         for j in range(len(cats)):
             v = plot.values[i, j]
             ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=7.5,
-                    color="white" if v < 0.45 else "#0f172a")
-    ax.set_title("Elite fantasy players are well-rounded, yet each leans on different categories")
+                    color="white" if abs(v) > 0.6 else "#0f172a")
+    ax.set_title("Normalized category scores of the top 15 players by H2H value")
     ax.set_xlabel("Scoring category")
     ax.set_ylabel("Player (ranked by H2H value, best at top)")
     cbar = fig.colorbar(im, ax=ax, fraction=0.035, pad=0.03)
-    cbar.set_label("Normalized category score (1 = league best, TOV negative = good)")
+    cbar.set_label("Normalized score: red = league best, blue = low (turnovers stored negative)")
     ax.grid(False)
     fig.text(0.5, -0.02,
-             "Each cell is a player's normalized score in one category (0-1). Brighter = stronger. "
-             "Turnovers (TOV) are stored as negative because fewer is better.",
+             "Each cell is a player's normalized score in one category (range -1 to 1). Warm red = "
+             "strong, cold blue = weak. Turnovers are stored as negative because fewer is better.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "value", "category_breakdown_top15.png")
 
@@ -355,20 +403,21 @@ def fig_category_scarcity(season_df: pd.DataFrame) -> None:
     fig, ax = plt.subplots(figsize=(10, 6.5))
     norm = (np.array(covs) - min(covs)) / (max(covs) - min(covs) + 1e-9)
     colors = SEQUENTIAL(0.15 + 0.7 * norm)
-    bars = ax.bar(cats, covs, color=colors, width=0.66, edgecolor="white")
+    bars = ax.bar([pretty(c) for c in cats], covs, color=colors, width=0.66,
+                  edgecolor="white")
     for rect, cov in zip(bars, covs):
         ax.text(rect.get_x() + rect.get_width() / 2, cov + max(covs) * 0.01,
                 f"{cov:.2f}", ha="center", va="bottom", fontsize=10,
                 fontweight="bold", color="#1e293b")
 
-    ax.set_title("Blocks are by far the scarcest category, so each block swings a matchup more")
+    ax.set_title("Spread of each statistical category across players (coefficient of variation)")
     ax.set_xlabel("Statistical category")
     ax.set_ylabel("Coefficient of variation (std / mean)")
     ax.set_ylim(0, max(covs) * 1.14)
     style_axes(ax)
     fig.text(0.5, -0.03,
-             "Higher = scarcer / more spread out across players. Scarce, high-variance categories "
-             "(e.g. blocks) swing weekly H2H matchups more than common, evenly-spread ones.",
+             "Coefficient of variation = standard deviation divided by the mean of each per-game "
+             "category across all players. Higher means the category is more spread out / scarcer.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "value", "category_scarcity.png")
 
@@ -381,33 +430,38 @@ def fig_category_correlation(value_df: pd.DataFrame) -> None:
     data = value_df[cats].apply(pd.to_numeric, errors="coerce")
     corr = data.corr().values
 
-    fig, ax = plt.subplots(figsize=(8.5, 7.5))
+    fig, ax = plt.subplots(figsize=(10, 9))
     im = ax.imshow(corr, cmap=DIVERGING, vmin=-1, vmax=1, aspect="equal")
+    labels = [pretty(c) for c in cats]
     ax.set_xticks(range(len(cats)))
     ax.set_yticks(range(len(cats)))
-    ax.set_xticklabels(cats, rotation=45, ha="right")
-    ax.set_yticklabels(cats)
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8.5)
+    ax.set_yticklabels(labels, fontsize=8.5)
     for i in range(len(cats)):
         for j in range(len(cats)):
             v = corr[i, j]
             ax.text(j, i, f"{v:.2f}", ha="center", va="center",
                     color="white" if abs(v) > 0.6 else "#0f172a", fontsize=9)
-    ax.set_title("Most fantasy categories are only weakly related, so each must be targeted")
+    ax.set_title("Correlation between scoring categories across players")
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label("Pearson correlation")
+    cbar.set_label("Pearson correlation (red = positive, blue = negative)")
     ax.grid(False)
     fig.text(0.5, -0.02,
-             "Pearson correlation between players' normalized category scores. Light = uncorrelated. "
-             "Few strong pairs means a balanced roster needs players drafted for specific categories.",
+             "Pearson correlation between players' normalized category scores. Red = move together, "
+             "blue = move oppositely, near-white = unrelated.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "value", "category_correlation_heatmap.png")
 
 
-def fig_top_h2h_value(value_df: pd.DataFrame) -> None:
+def fig_top_h2h_value(value_df: pd.DataFrame, weekly_df: pd.DataFrame | None = None) -> None:
     if "H2H_value" not in value_df.columns:
         print("  [SKIP] no H2H_value column")
         return
     top = value_df.sort_values("H2H_value", ascending=False).head(30).copy()
+    if weekly_df is not None and "games_played_mean" in weekly_df.columns:
+        top = top.merge(
+            weekly_df[["player_id", "games_played_mean"]], on="player_id", how="left"
+        )
     top = top.iloc[::-1]
 
     fig, ax = plt.subplots(figsize=(10, 11))
@@ -416,32 +470,94 @@ def fig_top_h2h_value(value_df: pd.DataFrame) -> None:
     colors = SEQUENTIAL(0.2 + 0.7 * norm.values)
     ax.barh(top["player_id"], top["H2H_value"], color=colors, edgecolor="white",
             height=0.72)
-    for y, val in enumerate(top["H2H_value"]):
-        ax.text(val + top["H2H_value"].max() * 0.005, y, f"{val:.2f}",
+    has_gp = "games_played_mean" in top.columns
+    for y, (_, row) in enumerate(top.iterrows()):
+        txt = f"{row['H2H_value']:.2f}"
+        if has_gp and pd.notna(row.get("games_played_mean")):
+            txt += f"   ({row['games_played_mean']:.0f} games)"
+        ax.text(row["H2H_value"] + top["H2H_value"].max() * 0.005, y, txt,
                 va="center", fontsize=8.5, color="#1e293b")
 
-    ax.set_title("A thin elite tier tops the projected H2H value rankings")
+    ax.set_title("Top 30 players by projected H2H value")
     ax.set_xlabel("Projected H2H value")
     ax.set_ylabel("Player")
-    ax.set_xlim(0, top["H2H_value"].max() * 1.08)
+    ax.set_xlim(0, top["H2H_value"].max() * 1.15)
     style_axes(ax)
+    if has_gp:
+        fig.text(0.5, -0.01,
+                 "Numbers in parentheses are projected games played out of 82 (from the Monte Carlo "
+                 "simulation). Weekly stats already reflect missed games; this shows durability on top.",
+                 ha="center", fontsize=9, color="#64748b")
     save(fig, "value", "top30_h2h_value.png")
+
+
+def fig_h2h_vs_games_played(value_df: pd.DataFrame, weekly_df: pd.DataFrame) -> None:
+    if "games_played_mean" not in weekly_df.columns:
+        print("  [SKIP] no games_played_mean in weekly projections")
+        return
+    df = value_df.merge(weekly_df[["player_id", "games_played_mean"]], on="player_id", how="inner")
+    df["games_played_mean"] = pd.to_numeric(df["games_played_mean"], errors="coerce")
+    df["H2H_value"] = pd.to_numeric(df["H2H_value"], errors="coerce")
+    df = df.dropna(subset=["games_played_mean", "H2H_value"])
+    if len(df) < 3:
+        return
+
+    x = df["games_played_mean"].values
+    y = df["H2H_value"].values
+
+    fig, ax = plt.subplots(figsize=(10, 7.5))
+    ax.scatter(x, y, s=36, color=BLUE, alpha=0.55, edgecolor="white", linewidth=0.5, zorder=3)
+    ax.axvline(82, color="#94a3b8", ls=":", lw=1.2, label="full season (82 games)")
+
+    slope, intercept, r, _, _ = stats.linregress(x, y)
+    xs = np.linspace(x.min(), x.max(), 100)
+    ax.plot(xs, slope * xs + intercept, color=ORANGE, lw=2.4,
+            label=f"Trend (Pearson r = {r:.2f})")
+
+    # Label a few notable players: high value + few games, and high value + many games.
+    df["resid"] = y - (slope * x + intercept)
+    label_idx = set()
+    for subset in [
+        df.sort_values("H2H_value", ascending=False).head(3).index,
+        df.sort_values(["H2H_value", "games_played_mean"], ascending=[False, True]).head(3).index,
+        df.sort_values("games_played_mean", ascending=False).head(2).index,
+    ]:
+        label_idx.update(subset)
+    for idx in label_idx:
+        ax.annotate(df.loc[idx, "player_id"],
+                    (df.loc[idx, "games_played_mean"], df.loc[idx, "H2H_value"]),
+                    fontsize=8, color="#475569", xytext=(4, 3), textcoords="offset points")
+
+    ax.set_title("Projected H2H value versus projected games played")
+    ax.set_xlabel("Projected games played (out of 82)")
+    ax.set_ylabel("Projected H2H value")
+    ax.legend()
+    style_axes(ax)
+    fig.text(0.5, -0.02,
+             "Each point is a player. H2H value is built from projected weekly stats (which already "
+             "account for missed games in the simulation). Games played is shown separately here "
+             "because durability still affects how much total production a team receives.",
+             ha="center", fontsize=9, color="#64748b")
+    save(fig, "value", "h2h_value_vs_games_played.png")
 
 
 def run_value() -> None:
     print("[value]")
     value_df = load_csv("h2h_value_2027.csv")
+    weekly_df = load_csv("projected_2027_weekly.csv")
     season_df = load_csv("player_season_stats.csv")
     if value_df is not None:
         fig_category_breakdown(value_df)
         fig_category_correlation(value_df)
-        fig_top_h2h_value(value_df)
+        fig_top_h2h_value(value_df, weekly_df)
+        if weekly_df is not None:
+            fig_h2h_vs_games_played(value_df, weekly_df)
     if season_df is not None:
         fig_category_scarcity(season_df)
 
 
 # ---------------------------------------------------------------------
-# Theme: thesis (real value vs fantasy value)
+# Theme: thesis (pre-draft H2H value vs simulated win shares)
 # ---------------------------------------------------------------------
 
 def fig_ws_vs_h2h_scatter(ws_df: pd.DataFrame) -> None:
@@ -475,14 +591,17 @@ def fig_ws_vs_h2h_scatter(ws_df: pd.DataFrame) -> None:
             ax.annotate(ids[idx], (x[idx], y[idx]), fontsize=8.5, color="#475569",
                         xytext=(5, 4), textcoords="offset points")
 
-    ax.set_title(f"Fantasy value only moderately tracks real-life value (r = {r:.2f})")
-    ax.set_xlabel("Win Shares (real-life basketball value)")
-    ax.set_ylabel("H2H value (fantasy value)")
+    ax.set_title("Pre-draft H2H value versus simulated win shares")
+    ax.set_xlabel("Simulated win shares (extra weekly matchup wins vs replacement)")
+    ax.set_ylabel("Pre-draft H2H value")
     ax.legend()
     style_axes(ax)
-    fig.text(0.5, -0.02,
-             "Each point is a player. Points far from the trend line are valued very differently "
-             "in fantasy than in real life.",
+    fig.text(0.5, -0.03,
+             "Each point is a drafted player (n ≈ 132). Win shares come from a simulated H2H "
+             "season (draft/compute_win_shares.py): for each matchup, stats are sampled from "
+             "projected weekly distributions and the player is swapped with a replacement-level "
+             "undrafted player. H2H value is a static pre-draft category score. Neither axis "
+             "reflects actual NBA performance.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "thesis", "ws_vs_h2h_scatter.png")
 
@@ -513,20 +632,21 @@ def fig_over_under_valued(ws_df: pd.DataFrame) -> None:
         ax.text(val + offset, y, f"{val:+.0f}", va="center",
                 ha="left" if val >= 0 else "right", fontsize=8.5, color="#1e293b")
 
-    ax.set_title("Many players are valued very differently in fantasy than in real life")
-    ax.set_xlabel("Rank difference  (Win Shares rank − H2H rank)")
+    ax.set_title("Largest rank gaps between pre-draft H2H value and simulated win shares")
+    ax.set_xlabel("Rank difference  (simulated win-shares rank − pre-draft H2H rank)")
     ax.set_ylabel("Player")
     style_axes(ax)
 
     # Manual legend.
     from matplotlib.patches import Patch
     ax.legend(handles=[
-        Patch(color=BLUE, label="Fantasy value > real value (fantasy overvalued)"),
-        Patch(color=ORANGE, label="Real value > fantasy value (fantasy undervalued)"),
+        Patch(color=BLUE, label="Ranked higher pre-draft than in simulation (paper > league)"),
+        Patch(color=ORANGE, label="Ranked higher in simulation than pre-draft (league > paper)"),
     ], loc="lower right")
-    fig.text(0.5, -0.02,
-             "Players with the largest gap between their real-life rank (Win Shares) and their "
-             "fantasy rank (H2H). Large gaps highlight draft bargains and traps.",
+    fig.text(0.5, -0.03,
+             "Only drafted players from one simulated 12-team snake draft. Positive (blue) means "
+             "the pre-draft H2H score ranks the player much better than their simulated matchup "
+             "contribution; negative (orange) means the opposite.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "thesis", "over_under_valued.png")
 
@@ -588,18 +708,16 @@ def fig_pred_vs_actual(eval_df: pd.DataFrame) -> None:
         ax.plot([lo, hi], [lo, hi], color="#0f172a", ls="--", lw=1.3, zorder=4,
                 label="perfect (y = x)")
         r = np.corrcoef(act, pred)[0, 1]
-        ax.set_title(f"{lbl}  (r = {r:.2f})", fontsize=12)
+        ax.set_title(f"{pretty_inline(lbl)}  (r = {r:.2f})", fontsize=11)
         ax.set_xlabel("Actual")
         ax.set_ylabel("Predicted")
         ax.legend(fontsize=8)
         style_axes(ax)
 
-    fig.suptitle("Projections track actual production closely for volume stats, less so for rates",
-                 y=0.997)
+    fig.suptitle("Projected versus actual per-game statistics (2026)", y=0.997)
     fig.text(0.5, -0.01,
-             "One panel per projected statistic (2026). Each point is a player; the dashed line is "
-             "a perfect prediction (y = x). Tight clustering around the line means accurate "
-             "projections.",
+             "One panel per projected statistic. Each point is a player; the dashed line is a "
+             "perfect prediction (y = x). r is the Pearson correlation for that statistic.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "model", "predicted_vs_actual.png")
 
@@ -619,14 +737,14 @@ def fig_error_metrics(summary_df: pd.DataFrame) -> None:
         ax.bar(x - w / 2, df["mae"], w, label="MAE", color=BLUE, edgecolor="white")
         ax.bar(x + w / 2, df["rmse"], w, label="RMSE", color=ORANGE, edgecolor="white")
         ax.set_xticks(x)
-        ax.set_xticklabels(df["stat"], rotation=30, ha="right")
-        ax.set_title("Projection error is largest for points and tiny for rate stats")
-        ax.set_ylabel("Error (in each stat's own units)")
+        ax.set_xticklabels([pretty(s) for s in df["stat"]], fontsize=8.5)
+        ax.set_title("Projection error per statistic (MAE and RMSE)")
+        ax.set_ylabel("Error (in each statistic's own units)")
         ax.legend()
         style_axes(ax)
-        fig.text(0.5, -0.04,
-                 "MAE = mean absolute error, RMSE = root mean squared error (per stat, in that "
-                 "stat's units). RMSE above MAE indicates occasional large misses.",
+        fig.text(0.5, -0.05,
+                 "MAE = mean absolute error, RMSE = root mean squared error, computed per statistic "
+                 "in that statistic's own units (so scales are not comparable across statistics).",
                  ha="center", fontsize=9, color="#64748b")
         save(fig, "model", "error_mae_rmse.png")
 
@@ -640,16 +758,16 @@ def fig_error_metrics(summary_df: pd.DataFrame) -> None:
         ax.bar(x + w / 2, df["spearman"], w, label="Spearman", color=ORANGE,
                edgecolor="white")
         ax.set_xticks(x)
-        ax.set_xticklabels(df["stat"], rotation=30, ha="right")
+        ax.set_xticklabels([pretty(s) for s in df["stat"]], fontsize=8.5)
         ax.set_ylim(0, 1)
-        ax.set_title("Projections correlate strongly with reality for counting stats, weakly for percentages")
+        ax.set_title("Correlation between projected and actual values, per statistic")
         ax.set_ylabel("Correlation with actual (0-1)")
         ax.legend()
         style_axes(ax)
-        fig.text(0.5, -0.04,
-                 "Pearson (linear) and Spearman (rank) correlation between projected and actual "
-                 "values per stat. Higher is better; percentage stats (FG%, FT%) are hardest to "
-                 "predict.",
+        fig.text(0.5, -0.05,
+                 "Pearson (linear) and Spearman (rank) correlation between each player's projected "
+                 "and actual value, computed per statistic. Higher means projections rank players "
+                 "more like reality.",
                  ha="center", fontsize=9, color="#64748b")
         save(fig, "model", "correlation_pearson_spearman.png")
 
@@ -669,15 +787,15 @@ def fig_ci_calibration(summary_df: pd.DataFrame) -> None:
                 ha="center", va="bottom", fontsize=9.5, fontweight="bold",
                 color="#1e293b")
     ax.set_xticks(range(len(df)))
-    ax.set_xticklabels(df["stat"], rotation=30, ha="right")
+    ax.set_xticklabels([pretty(s) for s in df["stat"]], fontsize=8.5)
     ax.set_ylim(0, 1.05)
-    ax.set_title("Confidence intervals are too narrow: most stats fall short of 90% coverage")
-    ax.set_ylabel("Share of actuals inside predicted 5-95% CI")
+    ax.set_title("Share of actual values inside the predicted 5-95% interval, per statistic")
+    ax.set_ylabel("Fraction of players inside the interval")
     ax.legend()
     style_axes(ax)
-    fig.text(0.5, -0.03,
-             "Bars below the dashed line mean the model's stated uncertainty is too tight "
-             "(real outcomes land outside the interval more than 10% of the time).",
+    fig.text(0.5, -0.04,
+             "Each bar is the fraction of players whose actual value fell inside the model's "
+             "predicted 5-95% interval. The dashed line marks the ideal value of 0.90.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "model", "ci_calibration.png")
 
@@ -697,34 +815,45 @@ def run_model() -> None:
 # Theme: draft
 # ---------------------------------------------------------------------
 
+def _strategy_labels_for(df: pd.DataFrame) -> list[str]:
+    """Build readable strategy labels from a frame that has strategy/punts/risk."""
+    if "strategy" in df.columns:
+        return [strategy_label(r.get("strategy"), r.get("punts", ""), r.get("risk", 0.0))
+                for _, r in df.iterrows()]
+    # Fallback: plain team labels.
+    return [f"Team {int(t)}" if pd.notna(t) and str(t).replace('.', '').isdigit()
+            else str(t) for t in df["team"]]
+
+
 def fig_standings(stand_df: pd.DataFrame) -> None:
     if not {"team", "W"}.issubset(stand_df.columns):
         print("  [SKIP] missing team/W in standings")
         return
     df = stand_df.sort_values("W", ascending=True).copy()
-    labels = [f"Team {int(t)}" if pd.notna(t) and str(t).replace('.', '').isdigit()
-              else str(t) for t in df["team"]]
+    labels = _strategy_labels_for(df)
 
-    fig, ax = plt.subplots(figsize=(10, 7.5))
+    fig, ax = plt.subplots(figsize=(11, 8))
     norm = (df["W"] - df["W"].min()) / (df["W"].max() - df["W"].min() + 1e-9)
     colors = SEQUENTIAL(0.2 + 0.7 * norm.values)
-    bars = ax.barh(labels, df["W"], color=colors, edgecolor="white", height=0.7)
+    bars = ax.barh(range(len(df)), df["W"], color=colors, edgecolor="white", height=0.72)
+    ax.set_yticks(range(len(df)))
+    ax.set_yticklabels(labels, fontsize=9)
     has_cat = "cat_pts" in df.columns
-    for y, (rect, (_, row)) in enumerate(zip(bars, df.iterrows())):
-        txt = f"{row['W']:.1f} W"
+    for y, (_, row) in enumerate(df.iterrows()):
+        txt = f"{row['W']:.2f} wins"
         if has_cat:
-            txt += f"  |  {row['cat_pts']:.1f} cat pts"
-        ax.text(row["W"] + df["W"].max() * 0.01, y, txt, va="center", fontsize=9,
+            txt += f"   ({row['cat_pts']:.1f} cat. pts)"
+        ax.text(row["W"] + df["W"].max() * 0.01, y, txt, va="center", fontsize=8.5,
                 color="#1e293b")
 
-    ax.set_title("Win totals separate the simulated league into clear tiers")
-    ax.set_xlabel("Average weekly wins over the simulated season")
-    ax.set_ylabel("Team (draft strategy)")
-    ax.set_xlim(0, df["W"].max() * 1.18)
+    ax.set_title("Average weekly wins by draft strategy (simulated 2027 season)")
+    ax.set_xlabel("Average weekly matchups won (out of 9 categories)")
+    ax.set_ylabel("Draft strategy")
+    ax.set_xlim(0, df["W"].max() * 1.22)
     style_axes(ax)
     fig.text(0.5, -0.02,
-             "Each team drafted with a different strategy; bars show average weekly category wins "
-             "(out of 9), with total category points to the right.",
+             "Each row is one drafting strategy used to build a team; bars show the average number "
+             "of weekly category matchups it won across the simulated season.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "draft", "standings_wins.png")
 
@@ -737,9 +866,13 @@ def fig_team_strengths(avg_df: pd.DataFrame, stand_df: pd.DataFrame | None) -> N
         return
 
     df = avg_df.copy()
-    # Order teams by standings (wins) if available, best at top.
+    # Order teams by standings (wins), best at top, and borrow strategy labels.
+    label_map = {}
     if stand_df is not None and {"team", "W"}.issubset(stand_df.columns):
-        order = stand_df.sort_values("W", ascending=False)["team"].tolist()
+        s = stand_df.sort_values("W", ascending=False).reset_index(drop=True)
+        order = s["team"].tolist()
+        s_labels = _strategy_labels_for(s)
+        label_map = {t: lab for t, lab in zip(s["team"], s_labels)}
         df["__ord"] = df["team"].apply(lambda t: order.index(t) if t in order else 1e9)
         df = df.sort_values("__ord")
 
@@ -750,37 +883,42 @@ def fig_team_strengths(avg_df: pd.DataFrame, stand_df: pd.DataFrame | None) -> N
     if "TOV" in z.columns:
         z["TOV"] = -z["TOV"]
 
-    team_labels = [f"Team {int(t)}" if pd.notna(t) and str(t).replace('.', '').isdigit()
-                   else str(t) for t in df["team"]]
+    row_labels = [label_map.get(t, f"Team {int(t)}" if pd.notna(t) else str(t))
+                  for t in df["team"]]
 
-    fig, ax = plt.subplots(figsize=(11, 9))
+    fig, ax = plt.subplots(figsize=(13, 9))
     im = ax.imshow(z.values, cmap=DIVERGING, vmin=-2.2, vmax=2.2, aspect="auto")
     ax.set_xticks(range(len(cat_cols)))
-    display_cats = [c.replace("_pct", "%") for c in cat_cols]
-    ax.set_xticklabels(display_cats, rotation=30, ha="right")
-    ax.set_yticks(range(len(team_labels)))
-    ax.set_yticklabels(team_labels)
-    for i in range(len(team_labels)):
+    ax.set_xticklabels([pretty(c) for c in cat_cols], fontsize=8.5)
+    ax.set_yticks(range(len(row_labels)))
+    ax.set_yticklabels(row_labels, fontsize=8.5)
+    for i in range(len(row_labels)):
         for j in range(len(cat_cols)):
             v = z.values[i, j]
             ax.text(j, i, f"{v:+.1f}", ha="center", va="center",
-                    color="white" if abs(v) > 1.3 else "#1e293b", fontsize=8)
-    ax.set_title("Each simulated team is built around a different set of category strengths")
+                    color="white" if abs(v) > 1.3 else "#0f172a", fontsize=8)
+    ax.set_title("Category strengths by draft strategy (z-scores)")
     cbar = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.03)
-    cbar.set_label("Relative strength (standard deviations from league mean)")
+    cbar.set_label("Relative strength: red = above league average, blue = below")
     ax.grid(False)
     fig.text(0.5, -0.02,
-             "Teams (rows, ordered best-to-worst by standings) vs the nine categories. Cells are "
-             "z-scores within each category; turnovers are sign-flipped so warmer/positive always "
-             "means stronger.",
+             "Rows are draft strategies (ordered best-to-worst by wins), columns are the nine "
+             "categories. Each cell is a z-score within its category; turnovers are sign-flipped so "
+             "red always means stronger.",
              ha="center", fontsize=9, color="#64748b")
     save(fig, "draft", "team_category_strengths.png")
 
 
 def run_draft() -> None:
     print("[draft]")
-    stand_df = load_csv("draft_standings_2027.csv")
-    avg_df = load_csv("draft_team_averages_2027.csv")
+    # Prefer the multi-strategy draft (teams = different strategies). Fall back to
+    # the single-strategy draft only if the strategic files are absent.
+    stand_df = load_csv("strategic_draft_standings_2027.csv")
+    avg_df = load_csv("strategic_draft_team_averages_2027.csv")
+    if stand_df is None:
+        stand_df = load_csv("draft_standings_2027.csv")
+    if avg_df is None:
+        avg_df = load_csv("draft_team_averages_2027.csv")
     if stand_df is not None:
         fig_standings(stand_df)
     if avg_df is not None:

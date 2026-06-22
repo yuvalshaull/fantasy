@@ -34,6 +34,32 @@ OUT_PATH = SCRIPT_DIR / "quality_plots" / "Visualization_Insights.docx"
 H2H_CATS = ["PTS", "REB", "AST", "STL", "BLK", "FG3M", "TOV", "FG", "FT"]
 ACCENT = RGBColor(0x0B, 0x53, 0x94)  # deep blue for headings
 
+STAT_FULL = {
+    "PTS": "points", "REB": "rebounds", "AST": "assists", "STL": "steals",
+    "BLK": "blocks", "FG3M": "3-pointers made", "TOV": "turnovers",
+    "FG": "field-goal %", "FT": "free-throw %",
+}
+
+
+def strategy_label(strategy: str, punts: str, risk) -> str:
+    """Readable one-line label for a draft strategy (inline form for prose)."""
+    strategy = (strategy or "baseline").lower()
+    punts = (str(punts) if punts is not None else "").strip()
+    if punts.lower() == "nan":
+        punts = ""
+    base = {
+        "baseline": "Balanced",
+        "blocks_heavy": "Blocks-heavy",
+        "guard": "Guard-focused",
+        "big": "Big-man-focused",
+    }.get(strategy, strategy.title())
+    if punts:
+        nice = ", ".join(STAT_FULL.get(p, p) for p in punts.split(","))
+        return f"{base} (punt {nice})"
+    if strategy == "baseline" and risk and float(risk) > 0.2:
+        return f"{base} (low-risk)"
+    return base
+
 
 # ---------------------------------------------------------------------
 # Number crunching (everything cited in the doc comes from here)
@@ -90,6 +116,19 @@ def compute_facts() -> dict:
     top30 = val.sort_values("H2H_value", ascending=False).head(30)["H2H_value"]
     f["top30_range"] = (float(top30.min()), float(top30.max()))
 
+    weekly = pd.read_csv(SIM_STATS / "projected_2027_weekly.csv")
+    merged = val.merge(weekly[["player_id", "games_played_mean"]], on="player_id", how="left")
+    gp = pd.to_numeric(merged["games_played_mean"], errors="coerce")
+    f["gp_range"] = (float(gp.min()), float(gp.max()))
+    f["gp_mean"] = float(gp.mean())
+    ok = merged.dropna(subset=["H2H_value", "games_played_mean"])
+    f["h2h_gp_r"] = float(ok["H2H_value"].corr(ok["games_played_mean"]))
+    # High value but relatively few projected games (durability risk).
+    risky = ok.sort_values(["H2H_value", "games_played_mean"], ascending=[False, True]).head(3)
+    f["risky_high_value"] = list(
+        risky[["player_id", "H2H_value", "games_played_mean"]].itertuples(index=False, name=None)
+    )
+
     ws = pd.read_csv(SIM_STATS / "ws_vs_h2h_2027.csv")
     x = pd.to_numeric(ws["win_shares"], errors="coerce")
     y = pd.to_numeric(ws["H2H_value"], errors="coerce")
@@ -109,12 +148,19 @@ def compute_facts() -> dict:
     f["model_worst_corr"] = summ.sort_values("pearson").iloc[0]
     f["model_cov_mean"] = float(summ["ci_5_95_coverage"].mean())
 
-    st = pd.read_csv(SIM_STATS / "draft_standings_2027.csv")
-    st = st.sort_values("W", ascending=False)
+    # Prefer the multi-strategy draft (each team = a different strategy).
+    strat_path = SIM_STATS / "strategic_draft_standings_2027.csv"
+    st = pd.read_csv(strat_path if strat_path.exists()
+                     else SIM_STATS / "draft_standings_2027.csv")
+    st = st.sort_values("W", ascending=False).reset_index(drop=True)
+    st["label"] = [strategy_label(r.get("strategy", ""), r.get("punts", ""), r.get("risk", 0.0))
+                   for _, r in st.iterrows()]
     f["standings"] = st
     f["champion"] = st.iloc[0]
+    f["runner_up"] = st.iloc[1] if len(st) > 1 else st.iloc[0]
     f["last_place"] = st.iloc[-1]
     f["w_spread"] = float(st["W"].max() - st["W"].min())
+    f["has_strategies"] = "strategy" in st.columns
 
     return f
 
@@ -193,15 +239,16 @@ def build(f: dict) -> Document:
                   "axis limits are chosen to fill the plot without exaggerating differences."),
         ("Conditioning", "Distributions are shown per subgroup, e.g. points-per-game is "
                          "faceted by season and the projection scatter is split per statistic."),
-        ("Perception", "Colors carry meaning through a colorblind-safe palette (blue/orange, "
-                       "never red+green together) and perceptually-uniform colormaps (viridis). "
-                       "Quantities are encoded by length/position; no pie or area charts are used, "
-                       "and the original stacked bar was replaced by a heatmap to avoid a moving baseline."),
+        ("Perception", "Quantities are encoded by length or position; no pie or area charts are "
+                       "used, and the category breakdown is a heatmap rather than a stacked bar to "
+                       "avoid a moving baseline. Heatmaps use an intuitive warm/cold diverging "
+                       "scheme (red = high, blue = low) and bar charts avoid pairing red with green."),
         ("Transformation", "Stats are standardized (z-scores) for the team-strengths heatmap and "
-                           "normalized to 0-1 for category comparisons so they share one scale."),
-        ("Context", "Each figure has a take-away title (a conclusion, not a description), labelled "
-                    "axes, reference lines (y = x, ideal coverage = 0.90, the regression trend), "
-                    "annotated outliers, and a descriptive caption."),
+                           "normalized for category comparisons so they share one scale."),
+        ("Context", "Each figure has a plain descriptive title (the interpretation is written here "
+                    "in this document, not on the chart), axis labels and tick labels that spell out "
+                    "the full statistic names, reference lines (y = x, ideal coverage = 0.90, the "
+                    "regression trend), annotated outliers, and a descriptive caption."),
         ("Smoothing", "A fitted normal curve is overlaid on each points-per-game histogram to make "
                      "the shape and skew of the distribution easy to read."),
         ("Data-ink", "Chart junk is minimized: top/right spines removed, light grid, direct data "
@@ -212,9 +259,9 @@ def build(f: dict) -> Document:
         p.add_run(text)
 
     doc.add_paragraph(
-        "All eight visualizations map directly onto the project goal defined in the milestone: "
-        "building and validating a data-driven H2H fantasy value for NBA players, and contrasting "
-        "that fantasy value with real-life basketball value."
+        "All visualizations map directly onto the project goal defined in the milestone: "
+        "building and validating a data-driven H2H fantasy value for NBA players, and comparing "
+        "a static pre-draft category score with simulated in-league matchup contribution."
     )
 
     # ---- overview -----------------------------------------------------------
@@ -299,39 +346,76 @@ def build(f: dict) -> Document:
 
     th = f["top_h2h"]
     lo, hi = f["top30_range"]
+    gp_lo, gp_hi = f["gp_range"]
     add_figure_block(
         doc, "2.4 Top 30 players by H2H value", "value/top30_h2h_value.png",
-        "A ranked horizontal bar chart of the 30 highest projected H2H values.",
+        "A ranked horizontal bar chart of the 30 highest projected H2H values, with projected games "
+        "played (out of 82) shown in parentheses next to each bar.",
         f"The model's top tier is led by {th[0][0]} ({th[0][1]:.2f}), {th[1][0]} ({th[1][1]:.2f}) and "
         f"{th[2][0]} ({th[2][1]:.2f}); the whole top 30 is compressed into a narrow band "
-        f"({lo:.2f}-{hi:.2f}). The small gaps between adjacent players show that draft order matters "
-        "most at the very top and that many mid-first-round players are near-interchangeable in value.",
+        f"({lo:.2f}-{hi:.2f}). Projected games played ranges from about {gp_lo:.0f} to {gp_hi:.0f} "
+        "across the pool, so two players with similar H2H value can still differ in durability.",
         "Scale (zero baseline, sorted), Perception (length encoding), Context.")
 
+    risky = f["risky_high_value"][0]
+    add_figure_block(
+        doc, "2.5 H2H value versus games played", "value/h2h_value_vs_games_played.png",
+        "A scatter of each player's projected H2H value against their projected games played "
+        "(out of 82), with a reference line at a full 82-game season.",
+        f"H2H value is computed from projected weekly stats in "
+        "`sim_stats/projected_2027_weekly.csv` (Monte Carlo simulation over 500 seasons). Those "
+        "weekly totals already embed missed games via each player's durability, but games played is "
+        f"not multiplied again on top (availability_multiplier = 1.0 for all players in "
+        f"`h2h_value_2027.csv`). The correlation between H2H value and games played is only "
+        f"r = {f['h2h_gp_r']:.2f}, meaning per-week talent and availability are related but not "
+        f"the same: e.g. {risky[0]} ranks highly on value ({risky[1]:.2f}) but is projected for "
+        f"only about {risky[2]:.0f} games - an important draft risk to flag separately.",
+        "Context (reference line at 82 games, trend line, labelled outliers), Transformation.")
+
     # ---- thesis -------------------------------------------------------------
-    add_heading(doc, "3. Real value vs fantasy value (core thesis)", level=1)
+    add_heading(doc, "3. Pre-draft H2H value vs simulated in-league win shares", level=1)
+
+    doc.add_paragraph(
+        "This section compares two fantasy-centric measures, both derived from the same Monte Carlo "
+        "projections (sim_stats/projected_2027_weekly.csv) — neither reflects actual NBA team success:"
+    )
+    for bullet in [
+        "H2H value (draft/compute_h2h_value_simple.py): a static pre-draft score. Each player's "
+        "projected weekly stats are converted to percentile ranks across the nine H2H categories, "
+        "summed, and adjusted for projection risk. Computed for the full player pool (~680 players).",
+        "Simulated win shares (draft/compute_win_shares.py): in-league impact from a Monte Carlo "
+        "fantasy season. After a 12-team snake draft, each weekly H2H matchup samples stats from "
+        "the projected distributions; win shares for a player equal how many extra matchup wins "
+        "their team gains versus swapping them for a replacement-level undrafted player. Computed "
+        "only for drafted players (~132) in one draft run.",
+    ]:
+        doc.add_paragraph(bullet, style="List Bullet")
 
     add_figure_block(
-        doc, "3.1 Win Shares vs H2H value", "thesis/ws_vs_h2h_scatter.png",
-        "A scatter plot of each player's real-life value (Win Shares) against fantasy value (H2H), "
-        "with a regression line and labelled outliers.",
-        f"Real and fantasy value are only moderately related (Pearson r = {f['ws_r']:.2f}, "
-        f"r-squared = {f['ws_r2']:.2f}, n = {f['ws_n']}): real-life value explains only about "
-        f"{f['ws_r2']*100:.0f}% of the variation in fantasy value. This is the central evidence for "
-        "the project's premise that a player's fantasy worth does not match his basketball worth, and "
-        "the labelled outliers are concrete examples to discuss.",
-        "Context (take-away title, trend line, outlier labels), Transformation (regression fit).")
+        doc, "3.1 Pre-draft H2H value vs simulated win shares", "thesis/ws_vs_h2h_scatter.png",
+        "A scatter plot of each drafted player's simulated win shares (x-axis) against their "
+        "pre-draft H2H value (y-axis), with a regression line and labelled outliers.",
+        f"The two measures are only moderately related (Pearson r = {f['ws_r']:.2f}, "
+        f"r-squared = {f['ws_r2']:.2f}, n = {f['ws_n']} drafted players): simulated matchup "
+        f"contribution explains only about {f['ws_r2']*100:.0f}% of the variation in the "
+        "pre-draft category score. This shows that a strong pre-draft ranking does not always "
+        "translate into the same in-league impact once rosters, weekly variance, and replacement "
+        "value are accounted for. Labelled outliers are concrete examples to discuss.",
+        "Context (descriptive title, trend line, outlier labels), Transformation (regression fit).")
 
     ov = f["over"][0]
     un = f["under"][0]
     add_figure_block(
-        doc, "3.2 Most over- and under-valued players", "thesis/over_under_valued.png",
-        "A diverging bar chart of the players with the largest gap between their Win-Shares rank and "
-        "their H2H rank.",
-        f"Some players are fantasy overvalued while others are hidden bargains: {ov[0]} is ranked "
-        f"about {int(ov[1])} places higher in fantasy than in real life, while {un[0]} is about "
-        f"{abs(int(un[1]))} places higher in real life than in fantasy. These gaps are actionable draft "
-        "advice and a vivid illustration of the thesis from 3.1.",
+        doc, "3.2 Largest rank gaps between the two measures", "thesis/over_under_valued.png",
+        "A diverging bar chart of drafted players with the largest gap between their simulated "
+        "win-shares rank and their pre-draft H2H rank "
+        "(rank difference = win-shares rank − H2H rank).",
+        f"Some players look much better on paper than in the simulated league, and vice versa: "
+        f"{ov[0]} is ranked about {int(ov[1])} places higher pre-draft (H2H) than in the "
+        f"simulation (win shares), while {un[0]} is about {abs(int(un[1]))} places higher in the "
+        "simulation than pre-draft. These gaps highlight players whose category profile does not "
+        "convert cleanly into weekly matchup wins — useful context for draft strategy beyond the "
+        "static H2H ranking.",
         "Perception (colorblind-safe blue/orange diverging), Scale (signed zero baseline), Context.")
 
     # ---- model --------------------------------------------------------------
@@ -381,28 +465,43 @@ def build(f: dict) -> Document:
         "Context (ideal-coverage reference line, honest reporting of a flaw), Scale.")
 
     # ---- draft --------------------------------------------------------------
-    add_heading(doc, "5. Draft simulation", level=1)
+    add_heading(doc, "5. Draft-strategy comparison", level=1)
 
-    champ, last = f["champion"], f["last_place"]
+    doc.add_paragraph(
+        "The draft simulation answers the key strategic question of the project: which way of "
+        "choosing players gives the best chance of winning the weekly category battles? Ten teams "
+        "drafted from the same player pool, each following a different strategy (a balanced "
+        "'best-available' approach, or a focus such as guards or big men, or deliberately 'punting' "
+        "- giving up - a category like turnovers, free-throw %, or points). A full head-to-head "
+        "season was then simulated to see how each strategy performed."
+    )
+
+    champ, runner, last = f["champion"], f["runner_up"], f["last_place"]
     add_figure_block(
-        doc, "5.1 Final standings", "draft/standings_wins.png",
-        "A horizontal bar chart of each simulated team's average weekly wins, annotated with total "
-        "category points.",
-        f"The strategies produce a clear spread of {f['w_spread']:.1f} wins between best and worst: "
-        f"team {int(champ['team'])} leads with {champ['W']:.1f} average weekly wins versus "
-        f"{last['W']:.1f} for team {int(last['team'])}. The gap shows that draft strategy materially "
-        "affects outcomes, validating the simulation as a way to compare value approaches.",
-        "Scale (zero baseline, sorted), Perception (length encoding), Context (direct labels).")
+        doc, "5.1 Wins by draft strategy", "draft/standings_wins.png",
+        "A horizontal bar chart of the average weekly category-matchups won by each draft strategy "
+        "over the simulated season.",
+        f"The best strategy is \"{champ['label']}\" with {champ['W']:.2f} average weekly wins, "
+        f"closely followed by \"{runner['label']}\" ({runner['W']:.2f}), while the weakest is "
+        f"\"{last['label']}\" with only {last['W']:.2f} - a spread of {f['w_spread']:.1f} wins "
+        "between best and worst. The clear ordering shows that draft strategy materially changes the "
+        "chance of winning: concentrating on scarce, high-impact categories (and punting a weak one "
+        "like turnovers) outperforms over-specialized builds such as a big-man team that punts both "
+        "assists and three-pointers.",
+        "Scale (zero baseline, sorted), Perception (length encoding), Context (strategy labels and direct values).")
 
     add_figure_block(
-        doc, "5.2 Team category strengths", "draft/team_category_strengths.png",
-        "A heatmap of teams (ordered by standings) against the nine categories, colored by z-score "
-        "within each category (turnovers sign-flipped so higher is always better).",
-        "Each team's row reveals the categories it punted or prioritized, and the top teams are not "
-        "uniformly strong but specialized in a coherent set of categories. This visually confirms the "
-        "H2H insight that building around a few targeted strengths beats chasing the best available "
-        "player every round.",
-        "Transformation (z-score standardization, sign-flip for TOV), Perception (diverging colorblind-safe map), Context.")
+        doc, "5.2 Category strengths by strategy", "draft/team_category_strengths.png",
+        "A heatmap of each draft strategy (rows, ordered best-to-worst) against the nine categories, "
+        "colored by z-score within each category (red = above league average, blue = below; "
+        "turnovers sign-flipped so red is always better).",
+        "Each row shows the fingerprint of a strategy: punt strategies are deep blue in the category "
+        "they gave up but red across the rest, and the top-ranked strategies are strong in several "
+        "scarce categories at once rather than dominating only one. This visually explains why the "
+        "winning strategy won - it converted its draft focus into real category advantages - and "
+        "confirms the H2H principle that building around a coherent set of targeted strengths beats "
+        "simply drafting the best available player every round.",
+        "Transformation (z-score standardization, sign-flip for TOV), Perception (warm/cold diverging map), Context.")
 
     return doc
 

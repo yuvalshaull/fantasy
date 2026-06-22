@@ -16,9 +16,10 @@ py visual_helper/generate_visualizations.py --theme value   # one theme only
 
 Figures are saved as 200 dpi PNGs, grouped into five themes (one folder each).
 All figures follow the course's visualization principles (Scale, Conditioning,
-Perception, Transformation, Context, Smoothing): take-away titles, labelled axes,
-reference lines, annotated outliers, captions, a colorblind-safe palette
-(blue/orange, no red+green) and perceptually-uniform colormaps (viridis).
+Perception, Transformation, Context, Smoothing): plain descriptive titles (the
+interpretation lives in the Word document, not on the chart), full stat names on
+axes, reference lines, annotated outliers, captions, and an intuitive warm/cold
+(red = high, blue = low) diverging scheme for heatmaps (no red+green pairing).
 
 `Visualization_Insights.docx` (in this folder) explains, in English, what each
 figure shows and the concrete take-away to cite in the writeup. Regenerate it with:
@@ -52,7 +53,10 @@ data is complete and reasonable. Source: `sim_stats/player_season_stats.csv`.
 ## `value/` - fantasy H2H value insights
 
 How the H2H fantasy value is built from the nine scoring categories. Sources:
-`sim_stats/h2h_value_2027.csv` and `sim_stats/player_season_stats.csv`.
+`sim_stats/h2h_value_2027.csv` (computed by `draft/compute_h2h_value_simple.py` from
+`sim_stats/projected_2027_weekly.csv`). Weekly stats come from a Monte Carlo simulation
+(`projections/simulate_all_players.py`) that models games played via each player's
+durability; `games_played_mean` is stored separately and shown in figures 2.4–2.5.
 
 - **`category_breakdown_top15.png`** - Heatmap of the top 15 players by `rank_H2H`
   against their normalized score (0-1) in each of the nine categories
@@ -71,23 +75,31 @@ How the H2H fantasy value is built from the nine scoring categories. Sources:
   together (e.g. blocks and rebounds) and which are independent, useful when
   building a team around specific strengths.
 
-- **`top30_h2h_value.png`** - Horizontal bar ranking of the 30 highest `H2H_value`
-  players, the core output of the valuation model.
+- **`top30_h2h_value.png`** - Horizontal bar ranking of the 30 highest projected H2H
+  values, with projected games played (out of 82) in parentheses beside each bar.
 
-## `thesis/` - real value vs fantasy value
+- **`h2h_value_vs_games_played.png`** - Scatter of projected H2H value against
+  projected games played per player, with a reference line at 82 games. Shows how
+  per-week talent and durability relate (they are correlated but not identical).
 
-The central question of the project: a player's fantasy value does not always
-match his real-life value. Source: `sim_stats/ws_vs_h2h_2027.csv`.
+## `thesis/` - pre-draft H2H value vs simulated win shares
 
-- **`ws_vs_h2h_scatter.png`** - Scatter of Win Shares (real-life basketball value,
-  x-axis) against H2H value (fantasy value, y-axis), with a regression line and the
-  Pearson `r`. The most divergent players (largest residuals) are labelled. Points
-  far from the line are valued very differently in fantasy than in reality.
+Compares two fantasy-centric value measures on the same projected data — neither
+reflects actual NBA performance. Source: `sim_stats/ws_vs_h2h_2027.csv` (built by
+`draft/compute_win_shares.py` merging simulated win shares with `h2h_value_2027.csv`).
 
-- **`over_under_valued.png`** - Diverging horizontal bar of the players with the
-  largest `rank_diff` (Win-Shares rank minus H2H rank). Green bars are overvalued
-  in fantasy relative to real life; red bars are undervalued, surfacing potential
-  draft bargains and traps.
+- **H2H value** — static pre-draft category score for the full player pool.
+- **Win shares** — simulated marginal contribution to weekly H2H matchup wins for
+  drafted players only (~132), measured vs a replacement-level undrafted player.
+
+- **`ws_vs_h2h_scatter.png`** - Scatter of simulated win shares (x-axis) against
+  pre-draft H2H value (y-axis), with a regression line and labelled outliers.
+  Each point is a drafted player from one simulated 12-team snake draft.
+
+- **`over_under_valued.png`** - Diverging bar of the largest rank gaps between the
+  two measures (simulated win-shares rank minus pre-draft H2H rank). Blue =
+  ranked higher pre-draft than in the simulation; orange = ranked higher in the
+  simulation than pre-draft.
 
 ## `model/` - projection model evaluation
 
@@ -113,15 +125,20 @@ How well the 2026 projections matched what actually happened. Sources:
   whether the model's uncertainty estimates are well calibrated, too narrow, or too
   wide.
 
-## `draft/` - draft simulation results
+## `draft/` - draft-strategy comparison
 
-Outcome of the simulated H2H draft. Sources: `sim_stats/draft_standings_2027.csv`
-and `sim_stats/draft_team_averages_2027.csv`.
+Which way of choosing players wins the H2H game. Ten teams draft from the same
+pool, each following a different strategy (balanced, guard/big focus, or punting a
+category). Sources: `sim_stats/strategic_draft_standings_2027.csv` and
+`sim_stats/strategic_draft_team_averages_2027.csv` (produced by
+`draft/run_multi_strategy_draft.py`; falls back to the non-strategic `draft_*`
+files if absent).
 
-- **`standings_wins.png`** - Horizontal bar of each team's average wins (`W`),
-  annotated with category points (`cat_pts`). The final league standings.
+- **`standings_wins.png`** - Horizontal bar of each draft strategy's average weekly
+  category wins (`W`), annotated with category points (`cat_pts`), sorted best to
+  worst. Shows which drafting strategy performs best.
 
-- **`team_category_strengths.png`** - Heatmap of teams (rows, ordered best-to-worst
+- **`team_category_strengths.png`** - Heatmap of strategies (rows, ordered best-to-worst
   by standings) against the nine categories (columns). Values are per-category
   z-scores, so each cell shows how strong a team is in that category relative to the
   league. Turnovers are sign-flipped so that warmer/higher always means better,
