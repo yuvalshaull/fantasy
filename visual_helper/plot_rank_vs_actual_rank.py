@@ -138,7 +138,6 @@ def plot_rank_scatter(
     ax.set_xlabel("Actual rank (2026 H2H)", fontsize=12)
     ax.set_ylabel("Projected rank (2026 H2H)", fontsize=12)
     ax.set_title("Projected vs Actual Player Rank — 2026", fontsize=14, fontweight="bold")
-    ax.legend(loc="lower right", framealpha=0.9)
     ax.grid(True, alpha=0.25)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
